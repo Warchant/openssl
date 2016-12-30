@@ -272,7 +272,7 @@ void _print_bn(BIGNUM* bn, char* name){
 }
 
 void _print(char *msg){
-    bool verbose = false;
+    int verbose = 0;
     if(verbose)
         printf("[EVIL] %s", msg);
 }
