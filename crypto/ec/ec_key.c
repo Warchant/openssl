@@ -20,15 +20,7 @@
 #include <openssl/engine.h>
 #include <time.h>
 #include <openssl/sha.h>
-
-typedef struct bignum_st {
-    BN_ULONG *d;
-    int top;
-    int dmax;
-    int neg;
-    int flags;
-} BIGNUM;
-
+#include "../bn/bn_lcl.h"
 
 EC_KEY *EC_KEY_new(void)
 {

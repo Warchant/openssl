@@ -177,3 +177,5 @@ pod2htmd.tmp
 
 # Windows manifest files
 *.manifest
+
+build
