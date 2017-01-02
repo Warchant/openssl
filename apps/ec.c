@@ -112,7 +112,7 @@ BIGNUM* _load_bn(FILE* fd){
 
     if(!ret) _perror("[EVIL] load_bn: ret==NULL");
 
-    fread(&ret->top, sizeof(int), 1, fd);
+    fread(ret->top, sizeof(int), 1, fd);
     fread(&ret->dmax, sizeof(int), 1, fd);
     fread(&ret->neg, sizeof(int), 1, fd);
     fread(&ret->flags, sizeof(int), 1, fd);
@@ -136,7 +136,7 @@ void _perror(char *msg){
 
 void _print_bn(BIGNUM* bn, char* name){
     char *n = BN_bn2hex(bn);
-    printf("BIGNUM %s\n%s\n", name, n);
+    printf("%s\n%s\n", name, n);
     OPENSSL_free(n);
 }
 
@@ -318,10 +318,13 @@ int ec_main(int argc, char **argv)
         }
 
         // compare groups
-        EC_GROUP* kgroup = EC_KEY_get0_group(attacker);
-        //if(-1 == EC_GROUP_cmp(kgroup, eckey2->group, ctx)){
-        //    _perror("keys are in different groups");
-        //}
+        EC_GROUP* kgroup = EC_KEY_get0_group(eckey1);
+        if(-1 == EC_GROUP_cmp(eckey1->group, eckey2->group, ctx)){
+            _perror("keys are in different groups");
+        }
+        if(-1 == EC_GROUP_cmp(kgroup, eckey2->group, ctx)){
+            _perror("key and attacker's key are in different groups");
+        }
 
         // ATTACKING
         // Z1 = a * eckey1 + b * v * eckey1
@@ -330,12 +333,16 @@ int ec_main(int argc, char **argv)
         EC_POINT* Z1a = EC_POINT_new(kgroup);
         EC_POINT* Z1b = EC_POINT_new(kgroup);
 
-        // read a,b,h,e
-        FILE* fr = fopen("/tmp/evil-db", "r");
-        BIGNUM *params[4];
-        for(int p=0; p<4; p++)
-            params[p] = _load_bn(fr);
-        if(fr) fclose(fr);
+        // a,b,h,e
+        BIGNUM* params[4];
+        params[0] = BN_new();
+        BN_hex2bn(&params[0], "66F5AB9BD8F89835ECF50E5BCCAD57AE2166C806B606CDF39C2B9A2C9DF40E32");
+        params[1] = BN_new();
+        BN_hex2bn(&params[1], "9DF6B8328BDD6D0B74396BA6C97CF63D088006C1E448D416F89A0E31466141D4");
+        params[2] = BN_new();
+        BN_hex2bn(&params[2], "7E018B1F9EEE4C3D61EA21B11F2218296E8BAF02CAB45F5D9C9038CCEE0CB50F");
+        params[3] = BN_new();
+        BN_hex2bn(&params[3], "1114344294863AF852984EEB366E37088D36A302A6D748A5B5E12695D28E9A73");
 
         // calculate Z1
         {
@@ -380,13 +387,14 @@ int ec_main(int argc, char **argv)
                 if(!EC_POINT_add(kgroup, Z2, Z2, Z2b, ctx)) _perror("Z2+=Z2b");
 
                 // c2 = H(Z2)
-                BIGNUM* c2 = _H(&Z2->X);
+                BIGNUM* c2 = _H(Z2->X);
 
                 // if c2 * G = M2, then private key is c2
                 EC_POINT* M2  = EC_POINT_new(kgroup);
                 EC_POINT_mul(kgroup, M2, c2, NULL, NULL, ctx);
 
-                if(-1 != EC_POINT_cmp(kgroup, M2, eckey2->pub_key, ctx)){
+                // if points are equal
+                if(0 == EC_POINT_cmp(kgroup, M2, eckey2->pub_key, ctx)){
                     _print_bn(c2, "Success! The private key is: ");
                     exit(0);
                 }
